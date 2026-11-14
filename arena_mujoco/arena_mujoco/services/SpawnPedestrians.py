@@ -258,7 +258,7 @@ def _take_handle(env_id: int) -> int | None:
 
 
 def _dress(env_id: int, handle: int, rig: Rig | None) -> None:
-    """Swap the skins on a pooled body: the capsule stays for rays and contacts, cameras see it only without skins."""
+    """Swap the skins on a pooled body: the capsule stays for rays, cameras see it only without skins."""
     store = context.get_scene_store()
     cache = store.asset_cache(env_id)
     bones = store.set_bones(env_id, handle, len(rig.bones) if rig is not None else 0)

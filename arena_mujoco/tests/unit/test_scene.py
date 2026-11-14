@@ -109,6 +109,16 @@ def test_mocap_capsule_blocks_a_ray_at_lidar_height(store: SceneStore):
     assert dist == pytest.approx(2.75, abs=1e-3)
 
 
+def test_mocap_capsule_never_pushes_a_body_it_overlaps(store: SceneStore):
+    handle = store.alloc_mocap(0, 1)[0]
+    store.add_body(0, _box('robot', (0.0, 0.0, 0.85), free=True))
+    store.recompile(0)
+    store.set_mocap_pose(0, handle, (0.0, 0.0, 0.85), (1.0, 0.0, 0.0, 0.0))
+    store.get_model(0).opt.gravity[:] = 0.0
+    store.step(50)
+    assert store.get_body_pose(0, 'robot')[0] == pytest.approx((0.0, 0.0, 0.85), abs=1e-6)
+
+
 def _flat_box(spec: mujoco.MjSpec) -> mujoco.MjsBody:
     body = spec.worldbody.add_body(name='flat')
     body.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=[0.1, 0.1, 0.0])

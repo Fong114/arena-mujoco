@@ -462,6 +462,8 @@ class SceneStore:
                 name=f'{name}{MOCAP_CAPSULE_SUFFIX}',
                 type=mujoco.mjtGeom.mjGEOM_CAPSULE,
                 size=[_MOCAP_CAPSULE_SIZE[0], _MOCAP_CAPSULE_SIZE[1], 0.0],
+                contype=0,
+                conaffinity=0,
             )
             scene.mocap_names[handle] = name
             scene.names.add(name)
