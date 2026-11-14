@@ -171,17 +171,18 @@ def _limit_force(act: mujoco.MjsActuator, joint: mujoco.MjsJoint) -> None:
         act.forcerange = [low, high]
 
 
-def _add_position_actuator(spec: mujoco.MjSpec, joint: mujoco.MjsJoint, name: str) -> None:
-    """Add a position-servo actuator (kp position feedback, kv damping) targeting joint."""
+def _add_position_actuator(spec: mujoco.MjSpec, joint: mujoco.MjsJoint, name: str, gains: tuple[float, float] | None) -> None:
+    """Add a position-servo actuator (kp position feedback, kv damping) targeting joint, with the URDF-sized gains when given."""
+    kp, kv = gains or (_POSITION_KP, _POSITION_KV)
     joint.actgravcomp = True
     act = spec.add_actuator()
     act.name = name
     act.trntype = mujoco.mjtTrn.mjTRN_JOINT
     act.target = joint.name
     act.gaintype = mujoco.mjtGain.mjGAIN_FIXED
-    act.gainprm = _prm(_POSITION_KP)
+    act.gainprm = _prm(kp)
     act.biastype = mujoco.mjtBias.mjBIAS_AFFINE
-    act.biasprm = _prm(0.0, -_POSITION_KP, -_POSITION_KV)
+    act.biasprm = _prm(0.0, -kp, -kv)
     _limit_force(act, joint)
 
 
@@ -245,7 +246,7 @@ def _pre_compile(
         add_vel = 'velocity' in ifaces or not add_pos
         pos_name, vel_name = _actuator_names(joint_mjcf)
         if add_pos:
-            _add_position_actuator(spec, joints[joint_mjcf], pos_name)
+            _add_position_actuator(spec, joints[joint_mjcf], pos_name, robot_entry.drives.get(urdf_joint))
             driven.add(joint_mjcf)
         if add_vel:
             _add_velocity_actuator(spec, joints[joint_mjcf], vel_name)
