@@ -366,7 +366,7 @@ def _attach_robot(
 ) -> mujoco.MjsBody:
     """Attach robot_spec under spec's worldbody with prefix, return the attached root body."""
     known = {asset.name for asset in (*spec.textures, *spec.materials, *spec.meshes)}
-    frame = spec.worldbody.add_frame(pos=list(pos), quat=list(quat))
+    frame = spec.worldbody.add_frame(pos=list(pos), quat=list(quat)) if localization else spec.worldbody.add_frame()
     spec.attach(robot_spec, prefix=prefix, frame=frame)
     for asset in (*spec.textures, *spec.materials, *spec.meshes):
         if asset.name not in known:
@@ -378,6 +378,9 @@ def _attach_robot(
 
     if localization:
         base.add_freejoint().name = f'{prefix}{base_frame}_free'
+    else:
+        base.pos = list(pos)
+        base.quat = list(quat)
 
     return base
 
