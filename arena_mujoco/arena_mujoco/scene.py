@@ -6,8 +6,9 @@ import itertools
 import logging
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 
 import mujoco
 import numpy as np
@@ -88,6 +89,23 @@ class AssetCache:
         self._pending.clear()
 
 
+@dataclass
+class _Carry:
+    """One body held by a hand body: its pose in the hand frame and the collision bits it gave up."""
+
+    hand: str
+    rel_pos: np.ndarray
+    rel_quat: np.ndarray
+    pos: np.ndarray
+    quat: np.ndarray
+    body_id: int = -1
+    hand_id: int = -1
+    qadr: int = -1
+    dofadr: int = -1
+    geoms: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=int))
+    collide: np.ndarray = field(default_factory=lambda: np.zeros((0, 2), dtype=int))
+
+
 class _EnvScene:
     """Self-contained MuJoCo state for one env, isolated so a recompile never touches a sibling."""
 
@@ -109,6 +127,7 @@ class _EnvScene:
         self.model_edits: int = 0
         self.velocities: dict[str, tuple[float, float, float]] = {}
         self.drive: tuple[np.ndarray, np.ndarray] = (np.zeros(0, dtype=int), np.zeros(0))
+        self.carried: dict[str, _Carry] = {}
 
 
 def _new_world_spec(capture_size: tuple[int, int]) -> mujoco.MjSpec:
@@ -178,14 +197,104 @@ def _resolve_drive(scene: _EnvScene) -> None:
     scene.drive = (np.array(dofs, dtype=int), np.array(qvel))
 
 
+def _set_collision(model: mujoco.MjModel, carry: _Carry, bits: np.ndarray) -> None:
+    model.geom_contype[carry.geoms] = bits[:, 0]
+    model.geom_conaffinity[carry.geoms] = bits[:, 1]
+    model.body_contype[carry.body_id] = np.bitwise_or.reduce(bits[:, 0], initial=0)
+    model.body_conaffinity[carry.body_id] = np.bitwise_or.reduce(bits[:, 1], initial=0)
+
+
+def _resolve_carry(scene: _EnvScene) -> None:
+    """Rebind every carried body to the live model, dropping the ones whose body or hand left it, and switch their collision off."""
+    model = scene.model
+    assert model is not None
+    for name, carry in list(scene.carried.items()):
+        carry.body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
+        carry.hand_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, carry.hand)
+        if carry.body_id < 0 or carry.hand_id < 0:
+            del scene.carried[name]
+            continue
+        jnt_adr = int(model.body_jntadr[carry.body_id])
+        free = model.body_jntnum[carry.body_id] == 1 and model.jnt_type[jnt_adr] == mujoco.mjtJoint.mjJNT_FREE
+        carry.qadr = int(model.jnt_qposadr[jnt_adr]) if free else -1
+        carry.dofadr = int(model.jnt_dofadr[jnt_adr]) if free else -1
+        carry.geoms = np.flatnonzero(model.geom_bodyid == carry.body_id)
+        carry.collide = np.stack((model.geom_contype[carry.geoms], model.geom_conaffinity[carry.geoms]), axis=1)
+        _set_collision(model, carry, np.zeros_like(carry.collide))
+
+
+def _mirror_carry(scene: _EnvScene) -> None:
+    """Write the pose of every carried static body into the spec, so a recompile keeps it."""
+    for name, carry in scene.carried.items():
+        if carry.qadr >= 0:
+            continue
+        body = scene.spec.body(name)
+        if body is not None:
+            body.pos = carry.pos.tolist()
+            body.quat = carry.quat.tolist()
+
+
+def _release(scene: _EnvScene, names: list[str]) -> None:
+    """Give the named carried bodies their collision back and stop carrying them, leaving each where it is."""
+    _mirror_carry(scene)
+    for name in names:
+        carry = scene.carried.pop(name)
+        if scene.model is not None and carry.body_id >= 0:
+            _set_collision(scene.model, carry, carry.collide)
+
+
+def _apply_carry(scene: _EnvScene) -> None:
+    """Put every carried body at its pose in the frame of its hand."""
+    model = scene.model
+    data = scene.data
+    assert model is not None and data is not None
+    for carry in scene.carried.values():
+        hand_pos = data.xpos[carry.hand_id]
+        hand_quat = data.xquat[carry.hand_id]
+        offset = np.zeros(3)
+        mujoco.mju_rotVecQuat(offset, carry.rel_pos, hand_quat)
+        carry.pos = hand_pos + offset
+        mujoco.mju_mulQuat(carry.quat, hand_quat, carry.rel_quat)
+        if carry.qadr >= 0:
+            data.qpos[carry.qadr : carry.qadr + 3] = carry.pos
+            data.qpos[carry.qadr + 3 : carry.qadr + 7] = carry.quat
+            data.qvel[carry.dofadr : carry.dofadr + 6] = 0.0
+        else:
+            model.body_pos[carry.body_id] = carry.pos
+            model.body_quat[carry.body_id] = carry.quat
+
+
+def _subtree_geoms(model: mujoco.MjModel, root: int) -> np.ndarray:
+    """Ids of the geoms of body root and every body below it."""
+    below = np.zeros(model.nbody, dtype=bool)
+    below[root] = True
+    for body_id in range(root + 1, model.nbody):
+        below[body_id] = below[model.body_parentid[body_id]]
+    return np.flatnonzero(below[model.geom_bodyid])
+
+
+def _gap(model: mujoco.MjModel, data: mujoco.MjData, first: np.ndarray, second: np.ndarray, limit: float) -> float:
+    """Smallest distance between any geom of first and any of second, limit when none is closer."""
+    gap = limit
+    for a in first:
+        for b in second:
+            gap = min(gap, mujoco.mj_geomDistance(model, data, int(a), int(b), gap, None))
+    return gap
+
+
 def _step_scene(scene: _EnvScene, n: int) -> None:
     data = scene.data
     assert data is not None
     dofs, qvel = scene.drive
+    moved = any(carry.qadr < 0 for carry in scene.carried.values())
     for _ in range(n):
         if dofs.size:
             data.qvel[dofs] = qvel
+        if scene.carried:
+            _apply_carry(scene)
         mujoco.mj_step(scene.model, data)
+    if moved:
+        scene.model_edits += 1
 
 
 class SceneStore:
@@ -289,6 +398,7 @@ class SceneStore:
             _drop_unused_assets(scene)
             scene.orphans = False
         rejected: ValueError | None = None
+        _mirror_carry(scene)
         try:
             new_model = scene.spec.compile()
         except ValueError as exc:
@@ -310,6 +420,7 @@ class SceneStore:
         scene.dirty = False
         scene.bone_ids.clear()
         _resolve_drive(scene)
+        _resolve_carry(scene)
         if rejected is not None:
             raise RejectedBodies(str(rejected)) from rejected
 
@@ -325,6 +436,7 @@ class SceneStore:
             scene.spec.delete(body)
             scene.names.discard(name)
             scene.velocities.pop(name, None)
+            scene.carried.pop(name, None)
         scene.pending.clear()
         scene.asset_cache.rollback(scene.spec)
 
@@ -400,6 +512,80 @@ class SceneStore:
         px, py, pz = (float(v) for v in data.xpos[body_id])
         qw, qx, qy, qz = (float(v) for v in data.xquat[body_id])
         return (px, py, pz), (qw, qx, qy, qz)
+
+    def attach(self, env_id: int, hand: str, candidates: Sequence[str], reach: float) -> str | None:
+        """Carry the nearest registered body among candidates within reach of hand's subtree along with hand until detached, returns its candidate name or None."""
+        scene = self._envs.get(env_id)
+        if scene is None:
+            return None
+        self._compile_if_dirty(env_id)
+        model = scene.model
+        data = scene.data
+        if model is None or data is None:
+            return None
+        hand_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, hand)
+        if hand_id < 0:
+            return None
+        mujoco.mj_kinematics(model, data)
+        hand_geoms = _subtree_geoms(model, hand_id)
+        best: tuple[float, str, str] | None = None
+        for candidate in candidates:
+            key = sanitize_id(candidate)
+            body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, key)
+            if body_id < 0 or key not in scene.names or key in scene.carried:
+                continue
+            gap = _gap(model, data, hand_geoms, np.flatnonzero(model.geom_bodyid == body_id), reach)
+            if gap < reach and (best is None or gap < best[0]):
+                best = (gap, candidate, key)
+        if best is None:
+            return None
+        _, candidate, key = best
+        hand_quat = data.xquat[hand_id]
+        body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, key)
+        inverse = np.zeros(4)
+        mujoco.mju_negQuat(inverse, hand_quat)
+        rel_pos = np.zeros(3)
+        mujoco.mju_rotVecQuat(rel_pos, data.xpos[body_id] - data.xpos[hand_id], inverse)
+        rel_quat = np.zeros(4)
+        mujoco.mju_mulQuat(rel_quat, inverse, data.xquat[body_id])
+        scene.carried[key] = _Carry(hand, rel_pos, rel_quat, data.xpos[body_id].copy(), data.xquat[body_id].copy())
+        _resolve_carry(scene)
+        return candidate
+
+    def gaps(self, env_id: int, hand: str, candidates: Sequence[str], limit: float) -> dict[str, float]:
+        """Distance from hand's subtree to each registered candidate body, capped at limit."""
+        scene = self._envs.get(env_id)
+        model = None if scene is None else scene.model
+        data = None if scene is None else scene.data
+        if scene is None or model is None or data is None:
+            return {}
+        hand_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, hand)
+        if hand_id < 0:
+            return {}
+        mujoco.mj_kinematics(model, data)
+        hand_geoms = _subtree_geoms(model, hand_id)
+        found: dict[str, float] = {}
+        for candidate in candidates:
+            body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, sanitize_id(candidate))
+            if body_id >= 0:
+                found[candidate] = _gap(model, data, hand_geoms, np.flatnonzero(model.geom_bodyid == body_id), limit)
+        return found
+
+    def detach(self, env_id: int, hand: str) -> list[str]:
+        """Stop carrying what the body hand holds, leaving each body where it is, returns the released body ids."""
+        return self._detach_where(env_id, lambda name: name == hand)
+
+    def detach_under(self, env_id: int, hand_prefix: str) -> list[str]:
+        """Stop carrying what every hand whose body id starts with hand_prefix holds, returns the released body ids."""
+        return self._detach_where(env_id, lambda name: name.startswith(hand_prefix))
+
+    def _detach_where(self, env_id: int, is_hand: Callable[[str], bool]) -> list[str]:
+        scene = self._envs.get(env_id)
+        if scene is None:
+            return []
+        names = [name for name, carry in scene.carried.items() if is_hand(carry.hand)]
+        _release(scene, names)
+        return names
 
     def get_clock_time(self, env_id: int) -> float:
         """Store clock, shared by every env, stamps /clock and sensors."""
@@ -585,6 +771,7 @@ class SceneStore:
             del scene.mocap_names[handle]
         scene.spec.delete(body)
         scene.velocities.pop(name, None)
+        scene.carried.pop(name, None)
         return True
 
     @staticmethod

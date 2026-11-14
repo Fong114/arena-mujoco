@@ -1,0 +1,8 @@
+uint32 env_id
+# root body id SpawnUrdf answered
+string robot
+# gripper joint, URDF name
+string joint
+---
+# body ids released, each stays where the hand left it
+string[] released
