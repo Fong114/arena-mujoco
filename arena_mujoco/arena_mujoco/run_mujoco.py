@@ -24,7 +24,7 @@ import arena_mujoco.odom  # noqa: F401, E402 (registers post_spawn + pump hooks 
 import arena_mujoco.sensors  # noqa: E402
 from arena_mujoco import context, hooks  # noqa: E402
 from arena_mujoco.lights import lighting  # noqa: E402
-from arena_mujoco.scene import PHYSICS_DT, SceneStore  # noqa: E402
+from arena_mujoco.scene import PHYSICS_DT, SceneStore, parse_capture_size  # noqa: E402
 from arena_mujoco.services import services  # noqa: E402
 from arena_mujoco.services.Articulated import forget_articulated  # noqa: E402
 from arena_mujoco.services.SpawnCeilings import CEILING_GROUP  # noqa: E402
@@ -60,6 +60,19 @@ def _arg_bool(name: str, default: bool) -> bool:
     for arg in sys.argv:
         if arg.startswith(prefix):
             return arg[len(prefix) :].lower() in ('true', '1')
+    return default
+
+
+def _arg_str(name: str, default: str) -> str:
+    """Read a string CLI argument in --name value or name:=value form."""
+    if name in sys.argv:
+        i = sys.argv.index(name)
+        if i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+    prefix = f"{name.lstrip('-')}:="
+    for arg in sys.argv:
+        if arg.startswith(prefix):
+            return arg[len(prefix) :]
     return default
 
 
@@ -318,10 +331,11 @@ class MujocoController(rclpy.node.Node):
 def main(args: list[str] | None = None) -> None:
     """Initialize MuJoCo server node and spin."""
     headless = _arg_bool('--headless', False)
+    capture_size = parse_capture_size(_arg_str('--viewport.resolution', ''))
 
     faulthandler.register(signal.SIGUSR1, all_threads=True)
 
-    scene_store = SceneStore()
+    scene_store = SceneStore(capture_size)
     context.set_scene_store(scene_store)
 
     rclpy.init(args=[])

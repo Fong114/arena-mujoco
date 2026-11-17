@@ -22,7 +22,7 @@ from arena_mujoco.sensors.core import get_renderer, make_stamp
 from arena_mujoco.services.SpawnCeilings import CEILING_GROUP
 from arena_mujoco.services.SpawnUrdf import frame_body
 
-from .camera import CAPTURE_HEIGHT, CAPTURE_WIDTH, Lens, orbit_of, pose_of, render
+from .camera import Lens, orbit_of, pose_of, render
 from .controller import Keyframe, Pose, ViewportController
 
 if TYPE_CHECKING:
@@ -128,7 +128,8 @@ class Viewport:
         self.apply()
         model = self._store.get_model(self._env_id)
         data = self._store.get_data(self._env_id)
-        renderer = None if model is None else get_renderer(self._env_id, model, CAPTURE_WIDTH, CAPTURE_HEIGHT)
+        width, height = self._store.capture_size
+        renderer = None if model is None else get_renderer(self._env_id, model, width, height)
         if renderer is None or data is None:
             response.success = False
             response.message = 'no offscreen renderer for the viewport'
@@ -137,11 +138,11 @@ class Viewport:
         image = sensor_msgs.msg.Image()
         image.header.stamp = make_stamp(self._store.time)
         image.header.frame_id = POSE_FRAME
-        image.width = CAPTURE_WIDTH
-        image.height = CAPTURE_HEIGHT
+        image.width = width
+        image.height = height
         image.encoding = 'rgb8'
         image.is_bigendian = False
-        image.step = CAPTURE_WIDTH * 3
+        image.step = width * 3
         image.data = pixels.tobytes()
         response.success = True
         response.message = 'ok'

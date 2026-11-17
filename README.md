@@ -264,7 +264,7 @@ arena launch sim:=mujoco
 The `arena_runtime` launch wires `run_mujoco.launch.py` when `sim:=mujoco`. To start the server alone:
 
 ```bash
-ros2 launch arena_mujoco run_mujoco.launch.py [headless:=True] [log_level:=info]
+ros2 launch arena_mujoco run_mujoco.launch.py [headless:=True] [viewport.resolution:=WxH] [log_level:=info]
 ```
 
 `--headless False` (the default) attempts to attach `mujoco.viewer` in passive mode for env 0 after it is first compiled. The viewer draws on its own thread from copies of the sim state (`MujocoController._draw_frames`): a renderer that cannot keep up skips frames instead of holding the sim (hospital_1 over xrdp: rtf 0.41 with the sync on the sim thread, 0.98 off it). Its camera frames everything standing in the env after each recompile until the user moves it.
@@ -279,7 +279,7 @@ When the display renders GL in software (llvmpipe under xrdp, VNC or `ssh -X`) a
 
 The server advertises the viewport contract `arena cam` drives on every sim, under `/arena/viewport` (`viewport/surface.py`): `set_view`, `set_reference_frame`, `set_projection` and `capture` services, the `cmd_view` keyframe stream and the `camera_pose` topic (10 Hz, `map` frame). It is a free camera over env 0 with poses in body axes (forward +X, up +Z), driven by the same drive model as the Isaac backend (`viewport/controller.py`).
 
-- **Capture** renders offscreen at 1920x1080 at the exact requested pose, roll and horizontal field of view included, so `arena cam ... --sim --record` also works with `headless:=True`. A request with `min_sim_time` is answered once the sim clock reaches it (15 s wall at most), which is what `--lockstep` takes rely on. Ceilings are hidden, as in the viewer.
+- **Capture** renders offscreen at 1920x1080 (`viewport.resolution:=WxH` sets it) at the exact requested pose, roll and horizontal field of view included, so `arena cam ... --sim --record` also works with `headless:=True`. A request with `min_sim_time` is answered once the sim clock reaches it (15 s wall at most), which is what `--lockstep` takes rely on. Ceilings are hidden, as in the viewer.
 - **Viewer.** While the passive viewer is open its free camera follows the driven pose, without roll and with the viewer's own lens. Moving the viewer camera by hand hands the view back and releases a tracked entity.
 - **Tracked entities** resolve as a body of env 0 by its ROS name first (`env_0/jackal/base_link` is the body `env_0_jackal_base_link`), else as a TF frame against `map`. The TF listener is created on the first entity that is not a body.
 - **Orthographic** projection keeps the horizontal field of view's width at the ground plane (10 m ahead when the view never meets the ground).

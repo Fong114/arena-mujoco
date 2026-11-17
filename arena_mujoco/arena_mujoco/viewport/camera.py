@@ -14,8 +14,6 @@ from .controller import Pose, q_from_euler, q_rotate
 if TYPE_CHECKING:
     from arena_mujoco.lights import Lighting
 
-CAPTURE_WIDTH = 1920
-CAPTURE_HEIGHT = 1080
 DEFAULT_HFOV = 1.047
 ORTHOGRAPHIC_FOCUS_M = 10.0
 

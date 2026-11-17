@@ -13,9 +13,11 @@ import mujoco
 import numpy as np
 
 from arena_mujoco.lights import DEFAULT_AMBIENT, DEFAULT_DIFFUSE, DEFAULT_SPECULAR, DEFAULT_SUN, SLOTS
-from arena_mujoco.viewport.camera import CAPTURE_HEIGHT, CAPTURE_WIDTH
 
 _ID_BAD = re.compile(r'[^0-9A-Za-z_]+')
+_RESOLUTION = re.compile(r'(\d+)\s*x\s*(\d+)', re.IGNORECASE)
+
+DEFAULT_CAPTURE_SIZE = (1920, 1080)
 
 _MOCAP_PARK = (0.0, 0.0, -1000.0)
 _MOCAP_CAPSULE_SIZE = (0.25, 0.6)
@@ -89,9 +91,9 @@ class AssetCache:
 class _EnvScene:
     """Self-contained MuJoCo state for one env, isolated so a recompile never touches a sibling."""
 
-    def __init__(self, env_id: int) -> None:
+    def __init__(self, env_id: int, capture_size: tuple[int, int]) -> None:
         self.env_id = env_id
-        self.spec: mujoco.MjSpec = _new_world_spec()
+        self.spec: mujoco.MjSpec = _new_world_spec(capture_size)
         self.model: mujoco.MjModel | None = None
         self.data: mujoco.MjData | None = None
         self.names: set[str] = set()
@@ -109,7 +111,7 @@ class _EnvScene:
         self.drive: tuple[np.ndarray, np.ndarray] = (np.zeros(0, dtype=int), np.zeros(0))
 
 
-def _new_world_spec() -> mujoco.MjSpec:
+def _new_world_spec(capture_size: tuple[int, int]) -> mujoco.MjSpec:
     """Build a fresh spec with a ground plane, the default lighting and the spare lights world lights are written into."""
     spec = mujoco.MjSpec()
     spec.option.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
@@ -117,8 +119,7 @@ def _new_world_spec() -> mujoco.MjSpec:
     spec.stat.extent = _RENDER_EXTENT_M
     spec.visual.map.znear = _RENDER_ZNEAR_M / _RENDER_EXTENT_M
     spec.visual.quality.numquads = _BOX_FACE_QUADS
-    spec.visual.global_.offwidth = CAPTURE_WIDTH
-    spec.visual.global_.offheight = CAPTURE_HEIGHT
+    spec.visual.global_.offwidth, spec.visual.global_.offheight = capture_size
     spec.visual.headlight.ambient = list(DEFAULT_AMBIENT)
     spec.visual.headlight.diffuse = list(DEFAULT_DIFFUSE)
     spec.visual.headlight.specular = list(DEFAULT_SPECULAR)
@@ -190,7 +191,8 @@ def _step_scene(scene: _EnvScene, n: int) -> None:
 class SceneStore:
     """Per-env MuJoCo scene registry owning one MjModel/MjData per env."""
 
-    def __init__(self) -> None:
+    def __init__(self, capture_size: tuple[int, int] = DEFAULT_CAPTURE_SIZE) -> None:
+        self.capture_size = capture_size
         self._envs: dict[int, _EnvScene] = {}
         self.time = 0.0
         self._pool = ThreadPoolExecutor(max_workers=_STEP_WORKERS, thread_name_prefix='mj_step')
@@ -199,7 +201,7 @@ class SceneStore:
         """Create and compile an empty scene for env_id if it does not exist yet."""
         if env_id in self._envs:
             return
-        scene = _EnvScene(env_id)
+        scene = _EnvScene(env_id, self.capture_size)
         self._envs[env_id] = scene
         self.recompile(env_id)
         assert scene.data is not None
@@ -666,10 +668,22 @@ def _joint_nv(jnt_type: int) -> int:
     return 1
 
 
+def parse_capture_size(value: str) -> tuple[int, int]:
+    """Parse WxH into positive (width, height), empty meaning DEFAULT_CAPTURE_SIZE."""
+    if not value.strip():
+        return DEFAULT_CAPTURE_SIZE
+    match = _RESOLUTION.fullmatch(value.strip())
+    if match is None or 0 in (int(match[1]), int(match[2])):
+        raise ValueError(f'viewport.resolution: expected WxH, got {value!r}')
+    return int(match[1]), int(match[2])
+
+
 __all__ = [
     'AssetCache',
     'RejectedBodies',
     'SceneStore',
+    'DEFAULT_CAPTURE_SIZE',
     'env_prefix',
+    'parse_capture_size',
     'sanitize_id',
 ]

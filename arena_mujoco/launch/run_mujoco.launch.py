@@ -44,6 +44,7 @@ def _gpu_renderer(headless: bool) -> str:
 def _server(context: launch.LaunchContext) -> list[launch.Action]:
     headless = LaunchConfiguration('headless').perform(context)
     gpu = _gpu_renderer(headless.lower() == 'true')
+    resolution = LaunchConfiguration('viewport.resolution').perform(context)
     return [
         *([LogInfo(msg=f'display renders GL in software, the viewer goes through VirtualGL on {gpu}')] if gpu else []),
         ExecuteProcess(
@@ -54,6 +55,7 @@ def _server(context: launch.LaunchContext) -> list[launch.Action]:
                 LaunchConfiguration('log_level'),
                 '--headless',
                 headless,
+                *(['--viewport.resolution', resolution] if resolution else []),
             ],
             output='screen',
         ),
@@ -75,6 +77,12 @@ def generate_launch_description():
         name='headless',
         default_value='False',
         description='Run the MuJoCo server without its viewer window.',
+    )
+
+    LaunchArgument(
+        name='viewport.resolution',
+        default_value='',
+        description='Viewport capture size, WxH. Empty keeps 1920x1080.',
     )
 
     return LaunchDescription(
