@@ -44,7 +44,6 @@ def position_gains(root: ET.Element, joint: ET.Element) -> tuple[float, float] |
         return None
     limit = joint.find('limit')
     effort = float(limit.get('effort') or EFFORT_FALLBACK) if limit is not None else EFFORT_FALLBACK
-    velocity = float(limit.get('velocity', 0.0)) if limit is not None else 0.0
     if kind == 'prismatic':
         mass = _carried_mass(root, joint)
         stiffness = max(STIFFNESS_PER_EFFORT_PRISMATIC * effort, mass * GRAVITY / MAX_GRAVITY_SAG)
@@ -52,8 +51,6 @@ def position_gains(root: ET.Element, joint: ET.Element) -> tuple[float, float] |
     else:
         stiffness = STIFFNESS_PER_EFFORT_REVOLUTE * effort
         damping = stiffness / STIFFNESS_DAMPING_RATIO
-    if velocity > 0.0:
-        damping = min(damping, effort / velocity)
     return stiffness, damping
 
 

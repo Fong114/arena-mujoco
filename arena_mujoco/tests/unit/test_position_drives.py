@@ -67,10 +67,10 @@ def _rig(urdf: Path) -> tuple[SceneStore, control._Robot]:
     return store, robot
 
 
-def test_a_revolute_drive_takes_its_stiffness_from_the_effort_and_its_damping_from_the_speed_limit(urdf: Path):
+def test_a_revolute_drive_takes_its_stiffness_from_the_effort_and_a_twentieth_of_it_as_damping(urdf: Path):
     stiffness, damping = position_drives(str(urdf))['shoulder']
     assert stiffness == pytest.approx(2600.0)
-    assert damping == pytest.approx(26.0 / 1.95)
+    assert damping == pytest.approx(130.0)
 
 
 def test_a_position_driven_joint_swings_to_its_target_near_its_speed_limit(urdf: Path):

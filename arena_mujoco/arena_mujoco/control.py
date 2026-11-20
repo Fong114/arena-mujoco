@@ -174,7 +174,6 @@ def _limit_force(act: mujoco.MjsActuator, joint: mujoco.MjsJoint) -> None:
 def _add_position_actuator(spec: mujoco.MjSpec, joint: mujoco.MjsJoint, name: str, gains: tuple[float, float] | None) -> None:
     """Add a position-servo actuator (kp position feedback, kv damping) targeting joint, with the URDF-sized gains when given."""
     kp, kv = gains or (_POSITION_KP, _POSITION_KV)
-    joint.actgravcomp = True
     act = spec.add_actuator()
     act.name = name
     act.trntype = mujoco.mjtTrn.mjTRN_JOINT
@@ -199,17 +198,6 @@ def _add_velocity_actuator(spec: mujoco.MjSpec, joint: mujoco.MjsJoint, name: st
     _limit_force(act, joint)
 
 
-def _compensate_gravity(root: mujoco.MjsBody, driven: set[str]) -> None:
-    """Cancel gravity on every body below a position-driven joint, routed through those joints' actuator force."""
-    stack = [(root, False)]
-    while stack:
-        body, below = stack.pop()
-        below = below or any(j.name in driven for j in body.joints)
-        if below:
-            body.gravcomp = 1.0
-        stack.extend((child, below) for child in body.bodies)
-
-
 def _add_mimic(spec: mujoco.MjSpec, follower: str, leader: str, multiplier: float, offset: float) -> None:
     """Constrain follower = offset + multiplier * leader with a joint equality."""
     eq = spec.add_equality()
@@ -228,12 +216,11 @@ def _pre_compile(
     robot_entry: RobotEntry,
     joint_names: list[str],
 ) -> None:
-    """Add actuators per actuated joint, mimic equalities and gravity compensation, record the actuator map."""
+    """Add actuators per actuated joint and mimic equalities, record the actuator map."""
     joints = {j.name: j for j in _joints_under(robot_root_body) if j.name}
     attached = sorted(joints)
     actuator_map: dict[str, tuple[str, str]] = {}
     mjcf_map: dict[str, str] = {}
-    driven: set[str] = set()
     for urdf_joint in joint_names:
         joint_mjcf = _match_joint(attached, urdf_joint)
         if joint_mjcf is None:
@@ -247,7 +234,6 @@ def _pre_compile(
         pos_name, vel_name = _actuator_names(joint_mjcf)
         if add_pos:
             _add_position_actuator(spec, joints[joint_mjcf], pos_name, robot_entry.drives.get(urdf_joint))
-            driven.add(joint_mjcf)
         if add_vel:
             _add_velocity_actuator(spec, joints[joint_mjcf], vel_name)
         actuator_map[urdf_joint] = (pos_name if add_pos else '', vel_name if add_vel else '')
@@ -257,7 +243,6 @@ def _pre_compile(
         leader_mjcf = _match_joint(attached, leader)
         if follower_mjcf is not None and leader_mjcf is not None:
             _add_mimic(spec, follower_mjcf, leader_mjcf, multiplier, offset)
-    _compensate_gravity(robot_root_body, driven)
     _pending[robot_entry.prim_name] = actuator_map
     _pending_mjcf[robot_entry.prim_name] = mjcf_map
 
