@@ -268,3 +268,29 @@ def test_redressing_a_pooled_body_frees_the_skins_it_wore(store: SceneStore):
         dress()
     assert len(store.get_spec(0).skins) == 1
     assert _rss_mb() - before < 8.0  # each skin holds ~2.4 MB: kept after delete, 12 rounds grow ~30 MB
+
+
+def test_discarding_a_spawn_frees_what_it_added(store: SceneStore):
+    verts = 100000
+    rng = np.random.default_rng(0)
+    vert, face = rng.random(verts * 3).tolist(), rng.integers(0, verts, verts * 3).tolist()
+
+    def build(spec: mujoco.MjSpec) -> mujoco.MjsBody:
+        mesh = spec.add_mesh()
+        mesh.name, mesh.uservert, mesh.userface = 'hull', vert, face
+        store.asset_cache(0).add(None, mesh)
+        body = spec.worldbody.add_body(name='hulled')
+        body.add_geom(type=mujoco.mjtGeom.mjGEOM_MESH, meshname='hull')
+        return body
+
+    def spawn() -> None:
+        store.add_body(0, build)
+        store.discard_pending(0)
+
+    spawn()
+    before = _rss_mb()
+    for _ in range(12):
+        spawn()
+    assert not store.find(0, 'hulled')
+    assert not store.get_spec(0).meshes
+    assert _rss_mb() - before < 8.0
