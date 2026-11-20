@@ -232,3 +232,40 @@ def test_comb_and_moving_boxes_pass_through_each_other_but_plain_boxes_keep_defa
     assert contacts('plate') == (1, 0)
     assert contacts('tread') == (1, 0)
     assert contacts('crate') == (1, 1)
+
+
+def _rss_mb() -> float:
+    import ctypes
+    import gc
+    from pathlib import Path
+
+    gc.collect()
+    ctypes.CDLL('libc.so.6').malloc_trim(0)
+    return next(int(line.split()[1]) for line in Path('/proc/self/status').read_text().splitlines() if line.startswith('VmRSS')) / 1024
+
+
+def test_redressing_a_pooled_body_frees_the_skins_it_wore(store: SceneStore):
+    handle = store.alloc_mocap(0, 1)[0]
+    verts = 60000
+    rng = np.random.default_rng(0)
+    vert, face = rng.random(verts * 3).tolist(), rng.integers(0, verts, verts * 3).tolist()
+
+    def dress() -> None:
+        (bone,) = store.set_bones(0, handle, 1)
+
+        def edit(spec: mujoco.MjSpec, _body: mujoco.MjsBody) -> None:
+            skin = spec.add_skin()
+            skin.name = f'skin_{handle}'
+            skin.vert, skin.face = vert, face
+            skin.bodyname, skin.bindpos, skin.bindquat = [bone], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]
+            skin.vertid, skin.vertweight = [list(range(verts))], [[1.0] * verts]
+
+        store.edit_mocap(0, handle, edit)
+        store.recompile(0)
+
+    dress()
+    before = _rss_mb()
+    for _ in range(12):
+        dress()
+    assert len(store.get_spec(0).skins) == 1
+    assert _rss_mb() - before < 8.0  # each skin holds ~2.4 MB: kept after delete, 12 rounds grow ~30 MB
