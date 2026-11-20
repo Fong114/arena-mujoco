@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ctypes
-import ctypes.util
 import itertools
 import logging
 import os
@@ -145,15 +144,14 @@ def _new_world_spec(capture_size: tuple[int, int]) -> mujoco.MjSpec:
     return spec
 
 
-_LIBC = ctypes.CDLL(ctypes.util.find_library('c') or None)
+_LIBC = ctypes.CDLL('libc.so.6')
 
 
 def _release_deleted(scene: _EnvScene) -> None:
     """Free what deleted elements still hold: MjSpec.delete keeps an element's data until its spec is freed, so a scene
     that swaps pedestrians' skins grows by every skin it ever wore. A copy carries only the live elements."""
     scene.spec = scene.spec.copy()
-    if hasattr(_LIBC, 'malloc_trim'):
-        _LIBC.malloc_trim(0)
+    _LIBC.malloc_trim(0)
 
 
 def _drop_unused_assets(scene: _EnvScene) -> None:

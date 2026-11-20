@@ -1,8 +1,11 @@
+import gc
+from pathlib import Path
+
 import mujoco
 import numpy as np
 import pytest
 
-from arena_mujoco.scene import MOVING_BODY_KG, PHYSICS_DT, RejectedBodies, SceneStore
+from arena_mujoco.scene import _LIBC, MOVING_BODY_KG, PHYSICS_DT, RejectedBodies, SceneStore
 
 
 def _box(name: str, pos: tuple[float, float, float], free: bool = False):
@@ -235,12 +238,8 @@ def test_comb_and_moving_boxes_pass_through_each_other_but_plain_boxes_keep_defa
 
 
 def _rss_mb() -> float:
-    import ctypes
-    import gc
-    from pathlib import Path
-
     gc.collect()
-    ctypes.CDLL('libc.so.6').malloc_trim(0)
+    _LIBC.malloc_trim(0)
     return next(int(line.split()[1]) for line in Path('/proc/self/status').read_text().splitlines() if line.startswith('VmRSS')) / 1024
 
 
