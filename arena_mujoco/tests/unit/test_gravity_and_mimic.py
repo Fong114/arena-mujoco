@@ -6,7 +6,7 @@ import pytest
 import numpy as np
 
 from arena_mujoco import context, control
-from arena_mujoco.drives import position_drives
+from arena_mujoco.drives import joint_drives
 from arena_mujoco.scene import SceneStore
 from arena_mujoco.services.SpawnUrdf import RobotEntry, _attach_robot, _initial_positions, _mimics, _mujoco_compat
 
@@ -22,9 +22,9 @@ _URDF = f"""<robot name="r">
   <joint name="left_finger_joint" type="prismatic"><parent link="base"/><child link="left_finger"/><origin xyz="-0.3 0 0"/><axis xyz="0 1 0"/><limit lower="0" upper="0.04" effort="20" velocity="1"/><mimic joint="right_finger_joint" multiplier="-1" offset="0.01"/></joint>
   <ros2_control name="r_system" type="system">
     <hardware><plugin>gz_ros2_control/GazeboSimSystem</plugin></hardware>
-    <joint name="lift"><command_interface name="position"/><state_interface name="position"/></joint>
-    <joint name="right_finger_joint"><command_interface name="position"/><state_interface name="position"/></joint>
-    <joint name="left_finger_joint"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="lift"><command_interface name="position"/><state_interface name="position"/><param name="kp">83385.0</param><param name="kd">2381.2</param><param name="effort">2000.0</param></joint>
+    <joint name="right_finger_joint"><command_interface name="position"/><state_interface name="position"/><param name="kp">490.5</param><param name="kd">14.0</param><param name="effort">20.0</param></joint>
+    <joint name="left_finger_joint"><command_interface name="position"/><state_interface name="position"/><param name="kp">490.5</param><param name="kd">14.0</param><param name="effort">20.0</param></joint>
   </ros2_control>
 </robot>
 """
@@ -55,7 +55,7 @@ def rig(tmp_path: Path):
         sensors=(),
         initial_positions=_initial_positions(str(urdf)),
         mimics=_mimics(str(urdf)),
-        drives=position_drives(str(urdf)),
+        drives=joint_drives(str(urdf)),
     )
 
     def build(spec: mujoco.MjSpec) -> mujoco.MjsBody:
@@ -110,7 +110,7 @@ _LEGGED = f"""<robot name="q">
   <joint name="knee" type="revolute"><parent link="body"/><child link="leg"/><axis xyz="0 1 0"/><limit lower="-1" upper="1" effort="200" velocity="10"/></joint>
   <ros2_control name="q_system" type="system">
     <hardware><plugin>gz_ros2_control/GazeboSimSystem</plugin></hardware>
-    <joint name="knee"><command_interface name="position"/><state_interface name="position"/></joint>
+    <joint name="knee"><command_interface name="position"/><state_interface name="position"/><param name="kp">20000.0</param><param name="kd">1000.0</param><param name="effort">200.0</param></joint>
   </ros2_control>
 </robot>
 """
@@ -137,7 +137,7 @@ def test_a_floating_base_rests_its_whole_weight_on_its_contacts(tmp_path: Path):
         command_interfaces=command_interfaces,
         urdf_sensors={},
         sensors=(),
-        drives=position_drives(str(urdf)),
+        drives=joint_drives(str(urdf)),
     )
 
     def build(spec: mujoco.MjSpec) -> mujoco.MjsBody:

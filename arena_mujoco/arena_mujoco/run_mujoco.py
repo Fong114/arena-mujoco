@@ -175,6 +175,7 @@ class MujocoController(rclpy.node.Node):
         self._scene_store.ensure_env(env_id)
         forget_robots(env_id, '')
         forget_articulated(env_id, '/')
+        self._scene_store.detach_under(env_id, '')
         self._scene_store.remove_by_prefix(env_id, '')
         reset_env(env_id)
         lighting(env_id).clear()

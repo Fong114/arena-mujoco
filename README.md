@@ -94,6 +94,8 @@ All services are on the global `/mujoco/` namespace. `env_id` selects the target
 | `mujoco/SetLights` | `arena_mujoco_msgs/SetLights` | Per light, set level and the per-fixture alive mask, or place it at a position turned by a yaw |
 | `mujoco/DeleteLights` | `arena_mujoco_msgs/DeleteLights` | Remove lights by name |
 | `mujoco/SetMapOffset` | `arena_mujoco_msgs/SetMapOffset` | Translate a robot's `map -> odom` transform, identity until set |
+| `mujoco/AttachPrim` | `arena_mujoco_msgs/AttachPrim` | Carry the nearest candidate prim within `reach` of a robot's gripper hand until detached, answer the prim attached (empty when none) |
+| `mujoco/DetachPrim` | `arena_mujoco_msgs/DetachPrim` | Stop carrying what a robot's gripper hand holds, answer the body ids released |
 
 ### Pedestrians (reuse `arena_people_msgs`)
 
@@ -209,11 +211,24 @@ Each `/mujoco/arena_peds` message names its pedestrian's actor SDF in `model_uri
 
 ---
 
+## Attach on grasp
+
+A gripper closing on a world object carries it until the next open. The fingers of a Tiago open about 9 cm and an office box is 39 cm wide, so no physical grasp can hold it: the carry is kinematic.
+
+`AttachPrim` names a robot (the root body id `SpawnUrdf` answered), the gripper's cap joint by its URDF name, candidate prim names and a `reach`. The hand is the parent body of the body carrying that joint (`control.find_robot(...).mjcf_joints` maps the URDF name to the MJCF joint). `SceneStore.attach` measures `mj_geomDistance` between every geom of the hand's subtree and every geom of each registered candidate, takes the nearest one closer than `reach` and stores its pose in the hand frame. A body already carried, a robot or joint that is unknown and a candidate out of reach attach nothing.
+
+Before every `mj_step`, `_step_scene` puts each carried body at its pose in the hand frame. A jointless body (every world prim) is carried through `model.body_pos` and `body_quat` and counted as a model edit, a free-joint body through `qpos` with zero velocity. While carried, the body's geoms have contype and conaffinity 0 (body level too), so it neither collides with the robot nor pushes anything. A recompile mirrors the carried pose of jointless bodies into the spec, rebinds the carry to the new model and switches the collision off again.
+
+`DetachPrim` restores the collision bits and leaves each body where the hand left it, with no drop simulation. Carries are forgotten when the carried body or the robot is deleted, on `ResetWorld`, and when the hand body no longer exists after a recompile.
+
+---
+
 ## ros2_control bridge wire format
 
-The `control.py` module wires per-joint position and velocity actuators into the MjSpec before each robot recompile:
+The `control.py` module wires per-joint position, velocity and effort actuators into the MjSpec before each robot recompile:
 
-- Position actuator: `gaintype=FIXED`, `biastype=AFFINE [0, -kp, -kv]`, with the gains `drives.position_drives` sizes from the URDF by arena_isaac's drive rule: revolute and continuous joints get kp 100 N m/rad per N m of `<limit effort>` and kv kp/20, prismatic joints kp 8 N/m per N of effort raised so the carried mass sags under 2 mm and critical kv. With kv = kp/20 the servo drives the joint toward its target at 20 times the error per second, its force clamped to the effort, the velocity loop gz_ros2_control's position mode runs at proportional gain 0.1 and a 200 Hz controller manager. A joint the URDF does not size keeps kp 1000 and kv 100. `_mujoco_compat` drops the `<dynamics damping>` of position-commanded joints, as arena_isaac does, so it cannot resist the servo (TIAGo's `arm_2_joint` damping of 40 N m s/rad alone would take 78 N m at its speed limit, beyond its 43 N m effort).
+- Position actuator: `gaintype=FIXED`, `biastype=AFFINE [0, -kp, -kv]`, with the kp and kv `drives.joint_drives` reads from the `kp` and `kd` params of the served URDF's ros2_control joint, which arena_robots derives. With kv = kp/20 the servo drives the joint toward its target at 20 times the error per second, its force clamped to the effort, the velocity loop gz_ros2_control's position mode runs at proportional gain 0.1 and a 200 Hz controller manager. A position joint without params keeps kp 1000 and kv 100. `_mujoco_compat` drops the `<dynamics damping>` of position-commanded joints, as arena_isaac does, so it cannot resist the servo (TIAGo's `arm_2_joint` damping of 40 N m s/rad alone would take 78 N m at its speed limit, beyond its 43 N m effort).
+- Effort actuator: a joint whose ros2_control command interface is `effort` gets a motor (`gaintype=FIXED 1`, no bias, force range +-the `effort` param) named `<joint>_eff`, applies the commanded effort raw and has no velocity actuator. Its position actuator holds the spawn pose with the joint's `kp` and `kd` until the first finite effort command, then its gains are zeroed in the live model.
 - Velocity actuator: `gaintype=FIXED kv=100`, `biastype=AFFINE [0, 0, -kv]` (damped velocity servo).
 - No gravity compensation, as in arena_isaac and Gazebo: a payload sags against the P gain by its load over kp (under 2 mm for a sized prismatic joint), and a legged robot's feet carry its whole weight.
 - Mimic joints: a URDF `<mimic joint= multiplier= offset=>` becomes a joint equality (`follower = offset + multiplier * leader`, named `<follower>_mimic`) and the follower gets no actuator. It is published in `joint_states` like any other joint and follows the leader's command.
@@ -224,6 +239,7 @@ ROS topics (per-robot, under the robot's namespace):
 | --- | --- | --- | --- |
 | `<ns>/mujoco/joint_commands_velocity` | in | `sensor_msgs/JointState` | Velocity setpoints; `.velocity` fields written to velocity actuator `data.ctrl` |
 | `<ns>/mujoco/joint_commands_position` | in | `sensor_msgs/JointState` | Position setpoints; `.position` fields written to position actuator `data.ctrl` |
+| `<ns>/mujoco/joint_commands_effort` | in | `sensor_msgs/JointState` | Effort commands; `.effort` fields written to effort actuator `data.ctrl` |
 | `<ns>/mujoco/joint_states` | out | `sensor_msgs/JointState` | `qpos`, `qvel`, `qfrc_actuator` for every URDF joint, mimic followers included, from the live model, published at ~100 Hz |
 
 The external `controller_manager` (launched by `MujocoSimulator._launch_robot_stack`) provides the actual control law. The server side only reads setpoints from the command topics and exposes actuation state back to the bridge.
@@ -296,6 +312,7 @@ The server advertises the viewport contract `arena cam` drives on every sim, und
 - `test_sensors.py`: URDF sensor parsing (joint references included), lidar layout from its URDF element, ray casts that skip the carrier and follow REP 117, a fan cast across threads, camera orientation, depth range and clipping, sensor pose pitch, cloud axes, one shared camera per backing sensor, the fixed near plane, contact pairs and the contact message. The render tests skip without an offscreen GL context.
 - `test_meshes.py`: per-material mesh parts, texture size limit, mesh bodies colliding as convex pieces (a ball rests on a table top and stays under it), rays passing through colliders, prim rescaling, the STL face limit, robot rollback, the material albedo order, one compile per delete burst.
 - `test_lights.py`: default lighting kept or replaced, dome and sun, panels lighting only the half space they face, the room fill of a rig as an unattenuated lamp at its center, a large rig reduced to the slots without losing light, finer lamps near the eye, dead fixtures and levels, spot cones and moved lights, the model lights a viewer gets, rendered floor brightness against the fixture's illuminance, a spot pool on a wall box between its corners, the three light services, each lamp's glow following its own light and level across a recompile, a glowing shade rendering its light's color in the dark and black when off, the glow material a light names.
+- `test_grasp.py`: the nearest candidate within reach attached, nothing beyond it, a static and a free body following the hand through steps and turns, collision off while carried and back after, a detached body staying where the hand left it, the carry surviving a recompile, carried bodies and hands being deleted, detaching by hand prefix.
 - `test_odom.py`: the `map -> odom` transform per robot, identity until `SetMapOffset` translates it, and false for an unknown robot.
 - `test_humans.py`: actor SDF parsing, clip keys, bone poses per clip with the root advance removed, body poses setting bone world rotations through a `.rig` (a two-bone chain, a spread joint, unmapped bones holding the neutral stance, a driver bone, soles found through the `.rig`), the skin a spawned pedestrian wears as the renderer draws it, rays hitting the capsule under it, a wire body pose taking precedence over clips, a missing or jointless rig playing its clips, the walk clip advancing by distance and idle when standing, bones and skins leaving with their body.
 
