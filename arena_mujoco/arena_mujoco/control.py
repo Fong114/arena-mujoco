@@ -11,6 +11,7 @@ import sensor_msgs.msg
 
 from arena_mujoco import hooks
 from arena_mujoco.context import get_scene_store
+from arena_mujoco.drives import JointDrive
 from arena_mujoco.scene import sanitize_id
 
 if TYPE_CHECKING:
@@ -31,7 +32,7 @@ class _Robot:
         self,
         env_id: int,
         joint_names: tuple[str, ...],
-        actuators: dict[str, tuple[str, str]],
+        actuators: dict[str, tuple[str, str, str]],
         prim_name: str,
     ) -> None:
         self.env_id = env_id
@@ -41,6 +42,7 @@ class _Robot:
         self.mjcf_joints: dict[str, str] = {}
         self._pos_ids: dict[str, int] = {}
         self._vel_ids: dict[str, int] = {}
+        self._eff_ids: dict[str, int] = {}
         self._joint_ids: dict[str, int] = {}
         self._model: mujoco.MjModel | None = None
         self._staged: dict[int, float] = {}
@@ -49,6 +51,9 @@ class _Robot:
         self.mimic_pub: rclpy.publisher.Publisher | None = None
         self.sub_vel: rclpy.subscription.Subscription | None = None
         self.sub_pos: rclpy.subscription.Subscription | None = None
+        self.sub_eff: rclpy.subscription.Subscription | None = None
+        self.released = False
+        self._released_model: mujoco.MjModel | None = None
 
     def stage_velocity(self, msg: sensor_msgs.msg.JointState) -> None:
         """Map each commanded velocity onto its velocity actuator's ctrl."""
@@ -70,24 +75,48 @@ class _Robot:
             if actuator_id is not None:
                 self._staged[actuator_id] = float(value)
 
+    def stage_effort(self, msg: sensor_msgs.msg.JointState) -> None:
+        """Map each commanded effort onto its motor actuator's ctrl, releasing the spawn hold on the first finite one."""
+        self.released = self.released or any(math.isfinite(value) for value in msg.effort)
+        for name, value in zip(msg.name, msg.effort, strict=False):
+            entry = self.actuators.get(name)
+            if entry is None or not math.isfinite(value):
+                continue
+            actuator_id = self._eff_ids.get(entry[2])
+            if actuator_id is not None:
+                self._staged[actuator_id] = float(value)
+
     def resolve(self, model: mujoco.MjModel) -> None:
         """Resolve actuator and joint names to ids against the live model, rebinding on recompile."""
         self._pos_ids.clear()
         self._vel_ids.clear()
+        self._eff_ids.clear()
         self._joint_ids.clear()
         self._staged.clear()
-        for pos_name, vel_name in self.actuators.values():
+        for pos_name, vel_name, eff_name in self.actuators.values():
             pos_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, pos_name)
             vel_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, vel_name)
             if pos_id >= 0:
                 self._pos_ids[pos_name] = pos_id
+            eff_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, eff_name)
             if vel_id >= 0:
                 self._vel_ids[vel_name] = vel_id
+            if eff_id >= 0:
+                self._eff_ids[eff_name] = eff_id
         for joint, mjcf in self.mjcf_joints.items():
             jnt_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, mjcf)
             if jnt_id >= 0:
                 self._joint_ids[joint] = jnt_id
         self._model = model
+
+    def _release_holds(self, model: mujoco.MjModel) -> None:
+        """Zero the gains of the position actuators holding effort-commanded joints at their spawn pose."""
+        for pos_name, _, eff_name in self.actuators.values():
+            actuator_id = self._pos_ids.get(pos_name)
+            if eff_name and actuator_id is not None:
+                model.actuator_gainprm[actuator_id, 0] = 0.0
+                model.actuator_biasprm[actuator_id, 1:3] = 0.0
+        self._released_model = model
 
     def apply_and_publish(self, sim_time: float) -> None:
         """Apply staged ctrl onto data, then publish joint states (rate-limited)."""
@@ -98,6 +127,8 @@ class _Robot:
             return
         if self._model is not model:
             self.resolve(model)
+        if self.released and self._released_model is not model:
+            self._release_holds(model)
         for actuator_id, value in self._staged.items():
             data.ctrl[actuator_id] = value
         if self.pub is None:
@@ -138,7 +169,7 @@ class _Robot:
 
 _robots: dict[tuple[int, str], _Robot] = {}
 
-_pending: dict[str, dict[str, tuple[str, str]]] = {}
+_pending: dict[str, dict[str, tuple[str, str, str]]] = {}
 _pending_mjcf: dict[str, dict[str, str]] = {}
 
 
@@ -153,9 +184,9 @@ def _joints_under(root: mujoco.MjsBody) -> list[mujoco.MjsJoint]:
     return joints
 
 
-def _actuator_names(joint_mjcf: str) -> tuple[str, str]:
-    """Name the position and velocity actuators off the compiled MJCF joint name."""
-    return f'{joint_mjcf}_pos', f'{joint_mjcf}_vel'
+def _actuator_names(joint_mjcf: str) -> tuple[str, str, str]:
+    """Name the position, velocity and effort actuators off the compiled MJCF joint name."""
+    return f'{joint_mjcf}_pos', f'{joint_mjcf}_vel', f'{joint_mjcf}_eff'
 
 
 def _prm(*vals: float) -> list[float]:
@@ -171,10 +202,9 @@ def _limit_force(act: mujoco.MjsActuator, joint: mujoco.MjsJoint) -> None:
         act.forcerange = [low, high]
 
 
-def _add_position_actuator(spec: mujoco.MjSpec, joint: mujoco.MjsJoint, name: str, gains: tuple[float, float] | None) -> None:
-    """Add a position-servo actuator (kp position feedback, kv damping) targeting joint, with the URDF-sized gains when given."""
-    kp, kv = gains or (_POSITION_KP, _POSITION_KV)
-    joint.actgravcomp = True
+def _add_position_actuator(spec: mujoco.MjSpec, joint: mujoco.MjsJoint, name: str, drive: JointDrive | None) -> None:
+    """Add a position-servo actuator (kp position feedback, kv damping) targeting joint, with the URDF params when given."""
+    kp, kv = (drive.kp, drive.kd) if drive is not None else (_POSITION_KP, _POSITION_KV)
     act = spec.add_actuator()
     act.name = name
     act.trntype = mujoco.mjtTrn.mjTRN_JOINT
@@ -199,15 +229,17 @@ def _add_velocity_actuator(spec: mujoco.MjSpec, joint: mujoco.MjsJoint, name: st
     _limit_force(act, joint)
 
 
-def _compensate_gravity(root: mujoco.MjsBody, driven: set[str]) -> None:
-    """Cancel gravity on every body below a position-driven joint, routed through those joints' actuator force."""
-    stack = [(root, False)]
-    while stack:
-        body, below = stack.pop()
-        below = below or any(j.name in driven for j in body.joints)
-        if below:
-            body.gravcomp = 1.0
-        stack.extend((child, below) for child in body.bodies)
+def _add_effort_actuator(spec: mujoco.MjSpec, joint: mujoco.MjsJoint, name: str, effort: float) -> None:
+    """Add a motor actuator applying the commanded effort raw, clamped to +-effort."""
+    act = spec.add_actuator()
+    act.name = name
+    act.trntype = mujoco.mjtTrn.mjTRN_JOINT
+    act.target = joint.name
+    act.gaintype = mujoco.mjtGain.mjGAIN_FIXED
+    act.gainprm = _prm(1.0)
+    act.biastype = mujoco.mjtBias.mjBIAS_NONE
+    act.forcelimited = mujoco.mjtLimited.mjLIMITED_TRUE
+    act.forcerange = [-effort, effort]
 
 
 def _add_mimic(spec: mujoco.MjSpec, follower: str, leader: str, multiplier: float, offset: float) -> None:
@@ -228,12 +260,11 @@ def _pre_compile(
     robot_entry: RobotEntry,
     joint_names: list[str],
 ) -> None:
-    """Add actuators per actuated joint, mimic equalities and gravity compensation, record the actuator map."""
+    """Add actuators per actuated joint and mimic equalities, record the actuator map."""
     joints = {j.name: j for j in _joints_under(robot_root_body) if j.name}
     attached = sorted(joints)
-    actuator_map: dict[str, tuple[str, str]] = {}
+    actuator_map: dict[str, tuple[str, str, str]] = {}
     mjcf_map: dict[str, str] = {}
-    driven: set[str] = set()
     for urdf_joint in joint_names:
         joint_mjcf = _match_joint(attached, urdf_joint)
         if joint_mjcf is None:
@@ -242,22 +273,24 @@ def _pre_compile(
             mjcf_map[urdf_joint] = joint_mjcf
             continue
         ifaces = robot_entry.command_interfaces.get(urdf_joint) or ('velocity',)
-        add_pos = 'position' in ifaces
-        add_vel = 'velocity' in ifaces or not add_pos
-        pos_name, vel_name = _actuator_names(joint_mjcf)
+        drive = robot_entry.drives.get(urdf_joint)
+        add_eff = drive is not None and drive.kind == 'effort'
+        add_pos = 'position' in ifaces or add_eff
+        add_vel = ('velocity' in ifaces or not add_pos) and not add_eff
+        pos_name, vel_name, eff_name = _actuator_names(joint_mjcf)
         if add_pos:
-            _add_position_actuator(spec, joints[joint_mjcf], pos_name, robot_entry.drives.get(urdf_joint))
-            driven.add(joint_mjcf)
+            _add_position_actuator(spec, joints[joint_mjcf], pos_name, drive)
         if add_vel:
             _add_velocity_actuator(spec, joints[joint_mjcf], vel_name)
-        actuator_map[urdf_joint] = (pos_name if add_pos else '', vel_name if add_vel else '')
+        if drive is not None and add_eff:
+            _add_effort_actuator(spec, joints[joint_mjcf], eff_name, drive.effort)
+        actuator_map[urdf_joint] = (pos_name if add_pos else '', vel_name if add_vel else '', eff_name if add_eff else '')
         mjcf_map[urdf_joint] = joint_mjcf
     for follower, (leader, multiplier, offset) in robot_entry.mimics.items():
         follower_mjcf = mjcf_map.get(follower)
         leader_mjcf = _match_joint(attached, leader)
         if follower_mjcf is not None and leader_mjcf is not None:
             _add_mimic(spec, follower_mjcf, leader_mjcf, multiplier, offset)
-    _compensate_gravity(robot_root_body, driven)
     _pending[robot_entry.prim_name] = actuator_map
     _pending_mjcf[robot_entry.prim_name] = mjcf_map
 
@@ -282,7 +315,7 @@ def _apply_initial_positions(env_id: int, robot: _Robot, positions: dict[str, fl
         if joint_mjcf is None:
             continue
         data.qpos[model.joint(joint_mjcf).qposadr[0]] = position
-        pos_name = robot.actuators.get(urdf_joint, ('', ''))[0]
+        pos_name = robot.actuators.get(urdf_joint, ('', '', ''))[0]
         if pos_name:
             data.ctrl[model.actuator(pos_name).id] = position
     mujoco.mj_forward(model, data)
@@ -318,6 +351,12 @@ def _post_spawn(
         robot.stage_position,
         10,
     )
+    robot.sub_eff = node.create_subscription(
+        sensor_msgs.msg.JointState,
+        f'{ns}/mujoco/joint_commands_effort',
+        robot.stage_effort,
+        10,
+    )
     _robots[(env_id, name)] = robot
 
 
@@ -334,6 +373,8 @@ def _despawn(env_id: int, robot_entry: RobotEntry) -> None:
             node.destroy_subscription(robot.sub_vel)
         if robot.sub_pos is not None:
             node.destroy_subscription(robot.sub_pos)
+        if robot.sub_eff is not None:
+            node.destroy_subscription(robot.sub_eff)
         del _robots[key]
 
 

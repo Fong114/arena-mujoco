@@ -14,7 +14,7 @@ from arena_robots.Sensor import SensorSpec
 
 from arena_mujoco import hooks
 from arena_mujoco.context import get_scene_store
-from arena_mujoco.drives import position_drives
+from arena_mujoco.drives import JointDrive, joint_drives
 from arena_mujoco.mesh_mat import MeshPart, mesh_parts, part_material
 from arena_mujoco.rollers import add_rollers, roller_wheels
 from arena_mujoco.scene import AssetCache, RejectedBodies, sanitize_id
@@ -144,7 +144,7 @@ class RobotEntry:
     sensors: tuple[SensorSpec, ...]
     initial_positions: dict[str, float] = field(default_factory=dict)
     mimics: dict[str, tuple[str, float, float]] = field(default_factory=dict)
-    drives: dict[str, tuple[float, float]] = field(default_factory=dict)
+    drives: dict[str, JointDrive] = field(default_factory=dict)
 
 
 _robots: dict[tuple[int, str], RobotEntry] = {}
@@ -438,7 +438,7 @@ def _spawn_urdf_cb(
         sensors=tuple(SensorSpec(name=item.name, type=item.type, topic=item.topic, frame=item.frame, sensor=item.sensor or None) for item in request.sensors),
         initial_positions=_initial_positions(request.urdf_path),
         mimics=_mimics(request.urdf_path),
-        drives=position_drives(request.urdf_path),
+        drives=joint_drives(request.urdf_path),
     )
 
     try:

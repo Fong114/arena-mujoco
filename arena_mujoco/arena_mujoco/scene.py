@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import itertools
 import logging
 import os
@@ -117,6 +118,7 @@ class _EnvScene:
         self.names: set[str] = set()
         self.dirty: bool = True
         self.orphans: bool = False
+        self.deleted: bool = False
         self.asset_cache = AssetCache()
         self.pending: list[tuple[str, mujoco.MjsBody]] = []
         self.mocap_names: dict[int, str] = {}
@@ -160,6 +162,17 @@ def _new_world_spec(capture_size: tuple[int, int]) -> mujoco.MjSpec:
     for slot in range(1, SLOTS):
         spec.worldbody.add_light(name=f'light_{slot}', active=False, castshadow=False)
     return spec
+
+
+_LIBC = ctypes.CDLL('libc.so.6')
+
+
+def _release_deleted(scene: _EnvScene) -> None:
+    """Free what deleted elements still hold: MjSpec.delete keeps an element's data until its spec is freed, so a scene
+    that swaps pedestrians' skins grows by every skin it ever wore. A copy carries only the live elements."""
+    scene.spec = scene.spec.copy()
+    scene.deleted = False
+    _LIBC.malloc_trim(0)
 
 
 def _drop_unused_assets(scene: _EnvScene) -> None:
@@ -397,6 +410,7 @@ class SceneStore:
         if scene.orphans:
             _drop_unused_assets(scene)
             scene.orphans = False
+            scene.deleted = True
         rejected: ValueError | None = None
         _mirror_carry(scene)
         try:
@@ -409,6 +423,8 @@ class SceneStore:
             new_model = scene.spec.compile()
         scene.pending.clear()
         scene.asset_cache.commit()
+        if scene.deleted:
+            _release_deleted(scene)
         new_data = mujoco.MjData(new_model)
 
         if old_model is not None and old_data is not None:
@@ -432,6 +448,7 @@ class SceneStore:
 
     @staticmethod
     def _drop_pending(scene: _EnvScene) -> None:
+        scene.deleted = scene.deleted or bool(scene.pending) or scene.asset_cache.uncommitted
         for name, body in scene.pending:
             scene.spec.delete(body)
             scene.names.discard(name)
