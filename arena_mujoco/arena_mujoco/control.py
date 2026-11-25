@@ -409,4 +409,9 @@ def get_robot(env_id: int, name: str) -> _Robot | None:
     return _robots.get((env_id, name))
 
 
-__all__ = ['get_robot']
+def find_robot(env_id: int, prim_name: str) -> _Robot | None:
+    """Return the live control wiring of the robot of env_id whose root body id is prim_name, or None."""
+    return next((robot for robot in _robots.values() if robot.env_id == env_id and robot.prim_name == prim_name), None)
+
+
+__all__ = ['find_robot', 'get_robot']

@@ -5,6 +5,7 @@ import collections.abc
 from .Articulated import drive_articulated_service, spawn_articulated_service
 from .DeletePedestrians import delete_pedestrians_service
 from .EditPrims import edit_prims_service
+from .Grasp import attach_prim_service, detach_prim_service
 from .Lights import delete_lights_service, set_lights_service, spawn_lights_service
 from .MovePedestrians import move_pedestrians_service
 from .SetMapOffset import set_map_offset_service
@@ -17,7 +18,9 @@ from .SpawnWalls import spawn_walls_service
 from .utils import Service
 
 services: collections.abc.Iterable[Service] = (
+    attach_prim_service,
     delete_lights_service,
+    detach_prim_service,
     drive_articulated_service,
     delete_pedestrians_service,
     edit_prims_service,

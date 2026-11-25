@@ -1,0 +1,12 @@
+uint32 env_id
+# root body id SpawnUrdf answered
+string robot
+# gripper joint, URDF name
+string joint
+# candidate prim names, the nearest within reach is taken
+string[] objects
+# largest distance from the hand to the prim in meters
+float64 reach
+---
+# the candidate attached, empty when none was within reach
+string attached

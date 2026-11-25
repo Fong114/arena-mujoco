@@ -64,3 +64,20 @@ def test_a_robot_spawns_at_its_ros2_control_initial_positions_and_holds_them(tmp
     assert data.qpos[knee] == pytest.approx(0.7)
     store.step(500)
     assert data.qpos[knee] == pytest.approx(0.7, abs=0.05)
+
+
+def test_a_welded_robot_stays_where_it_is_teleported_across_a_recompile(tmp_path: Path):
+    urdf = tmp_path / 'r.urdf'
+    urdf.write_text(_URDF)
+    robot_spec = mujoco.MjSpec.from_file(_mujoco_compat(str(urdf))[0])
+    store = SceneStore()
+    store.ensure_env(0)
+    yaw = (0.7071067811865476, 0.0, 0.0, 0.7071067811865476)
+    store.add_body(0, lambda spec: _attach_robot(spec, store.asset_cache(0), robot_spec, 'r_', 'base', (1.0, 2.0, 0.0), yaw, False))
+    store.recompile(0)
+    assert store.get_body_pose(0, 'r_base')[0] == pytest.approx((1.0, 2.0, 0.0))
+    assert store.set_body_pose(0, 'r_base', (5.0, 6.0, 0.0), (1.0, 0.0, 0.0, 0.0))
+    store.recompile(0)
+    pos, quat = store.get_body_pose(0, 'r_base')
+    assert pos == pytest.approx((5.0, 6.0, 0.0))
+    assert quat == pytest.approx((1.0, 0.0, 0.0, 0.0))
